@@ -38,17 +38,25 @@ basic authorization, and intentionally keeps everything else as simple as possib
 - **Minimal OAuth 2.0 endpoints**
   - `/.well-known/oauth-authorization-server` – exposes basic Authorization Server Metadata,
     including a flag indicating support for CIMD.
-  - `/authorize` – minimal authorization endpoint (supports both GET and POST) that:
+  - `/authorize` – authorization endpoint (supports both GET and POST) that:
     - validates the client via CIMD,
     - validates `redirect_uri`,
-    - returns a **dummy authorization code** via redirect.
-  - `/token` – minimal token endpoint that:
+    - shows a **login page** (username/password form),
+    - after successful login, generates a **real authorization code** and redirects to the callback.
+  - `/token` – token endpoint that:
     - accepts an authorization code grant,
-    - returns a **dummy access token** for that code.
+    - validates the authorization code,
+    - returns a **real access token** for valid codes.
+
+- **Local OAuth Client App** (`client-app.js`)
+  - Test client application that demonstrates the full OAuth flow locally
+  - Runs on port 4000 by default
+  - Provides `/login` endpoint to initiate the flow
+  - Provides `/callback` endpoint to receive authorization code and exchange it for tokens
 
 - **CORS support**
-  - Sends permissive CORS headers so that browser-based test clients can call the server when it is
-    exposed over HTTPS (for example via a tunneling tool) from a different origin.
+  - Sends permissive CORS headers so that browser-based test clients can call the server from
+    different origins (useful for local testing and when using HTTPS tunnels).
 
 ---
 
@@ -79,7 +87,9 @@ This will install the dependencies defined in `package.json`:
 
 ## Running the Server Locally
 
-Start the server:
+### Start the Authorization Server
+
+Start the CIMD authorization server:
 
 ```bash
 npm start
@@ -100,6 +110,37 @@ The server will log a message such as:
 ```text
 CIMD test OAuth server listening on port 3000
 ```
+
+### Start the Test Client App
+
+In a separate terminal, start the test client application:
+
+```bash
+npm run client
+```
+
+By default, the client app listens on:
+
+- `http://localhost:4000`
+
+You can configure the client app via environment variables:
+
+```bash
+AUTH_SERVER_BASE=http://localhost:3000 \
+CLIENT_ID=https://raw.githubusercontent.com/tanish111/cimd-local-oauth-server/refs/heads/main/client-metadata.json \
+REDIRECT_URI=http://localhost:4000/callback \
+npm run client
+```
+
+### Quick Test
+
+1. Start the authorization server: `npm start`
+2. Start the client app: `npm run client` (in another terminal)
+3. Open your browser to: `http://localhost:4000/login`
+4. You'll be redirected to the login page at `http://localhost:3000/authorize`
+5. Enter username: `admin`, password: `admin`
+6. After login, you'll be redirected back to the client app with an authorization code
+7. The client app will automatically exchange the code for an access token and display it
 
 ---
 
@@ -177,18 +218,28 @@ behavior.
    - Ensures the metadata contains a `redirect_uris` array.
    - Ensures the incoming `redirect_uri` is **exactly equal** (string match) to one of the entries.
 
-4. **Issue a dummy authorization code**
-   - If all validations pass:
-     - Builds a redirect to the validated `redirect_uri`.
-     - Appends:
-       - `code=cimd-demo-code`
-       - `state=<original state>` (if supplied).
-   - Sends an HTTP redirect to that URL.
+4. **Show login page** (GET request)
+   - If all validations pass and this is a GET request:
+     - Displays an HTML login form with username and password fields.
+     - Preserves all OAuth parameters (client_id, redirect_uri, state, etc.) in hidden form fields.
 
-5. **Errors**
-   - If any step fails, the server returns a JSON error with:
+5. **Process login** (POST request)
+   - If this is a POST request with username/password:
+     - Validates credentials (demo: accepts `admin` / `admin`).
+     - On successful login:
+       - Generates a **real authorization code** (random, base64url-encoded).
+       - Stores the code in memory with expiration (10 minutes).
+       - Builds a redirect to the validated `redirect_uri`.
+       - Appends:
+         - `code=<generated authorization code>`
+         - `state=<original state>` (if supplied).
+       - Sends an HTTP redirect to that URL.
+
+6. **Errors**
+   - If any validation step fails, the server returns a JSON error with:
      - `error: "invalid_request"`
      - `error_description` containing a human-readable explanation including which rule failed.
+   - If login fails, the login form is shown again with an error message.
 
 ---
 
@@ -203,7 +254,7 @@ behavior.
 - `grant_type` – **required**
   - This implementation only supports `authorization_code`.
 - `code` – **required**
-  - Must equal `cimd-demo-code`, which is the code issued by this server’s `/authorize` endpoint.
+  - Must be a valid authorization code issued by this server's `/authorize` endpoint.
 
 #### What Happens on `/token`
 
@@ -212,34 +263,41 @@ behavior.
      - `error: "unsupported_grant_type"`.
 
 2. Validates `code`:
-   - If `code` is not `cimd-demo-code`, returns:
+   - Looks up the authorization code in the server's in-memory store.
+   - If the code is not found, returns:
      - `error: "invalid_grant"`.
+   - If the code has expired (older than 10 minutes), returns:
+     - `error: "invalid_grant"` with description indicating expiration.
 
-3. On success, returns a JSON access token response:
+3. On success:
+   - Deletes the authorization code (one-time use).
+   - Generates a **real access token** (random, base64url-encoded).
+   - Returns a JSON access token response:
 
 ```json
 {
-  "access_token": "cimd-demo-access-token",
+  "access_token": "<random-base64url-token>",
   "token_type": "Bearer",
   "expires_in": 3600
 }
 ```
 
-This is a **dummy token** and is not backed by any storage or user identity. The purpose is to show
-the end-to-end flow, not to implement a full OAuth server.
+The access token is generated per-request and is not backed by any user identity or resource server.
+The purpose is to demonstrate the end-to-end OAuth flow with CIMD, not to implement a full
+production OAuth server.
 
 ---
 
 ## Example Client Metadata Document
 
 To test this server, you need to host a client metadata document at an **HTTPS URL**. The document
-should look like this (adjust the URLs to match where you host it):
+should look like this:
 
 ```json
 {
-  "client_id": "https://client.example.com/oauth/metadata.json",
+  "client_id": "https://raw.githubusercontent.com/tanish111/cimd-local-oauth-server/refs/heads/main/client-metadata.json",
   "redirect_uris": [
-    "https://client.example.com/oauth/callback"
+    "http://localhost:4000/callback"
   ],
   "response_types": [
     "code"
@@ -247,88 +305,50 @@ should look like this (adjust the URLs to match where you host it):
   "grant_types": [
     "authorization_code"
   ],
-  "scope": "openid profile email",
   "token_endpoint_auth_method": "none"
 }
 ```
 
+A sample `client-metadata.json` file is included in this repository. You can host it on GitHub (as a
+raw file URL) or any other HTTPS-capable static file host.
+
 Important rules for this document:
 
 - `client_id` must be the **exact URL** where this JSON is served.
-- `redirect_uris` must include the `redirect_uri` you will send to `/authorize`.
+- `redirect_uris` must include the `redirect_uri` you will send to `/authorize` (e.g., `http://localhost:4000/callback` for local testing).
 - Do **not** include `client_secret` or `client_secret_expires_at`.
 - Do **not** use any `client_secret_*` `token_endpoint_auth_method` values.
 
 ---
 
-## Example Authorization Request (Local)
+## Using the Server via an HTTPS Tunnel (Optional)
 
-Assuming:
+For local testing, HTTP is sufficient. However, if you want to test with external clients or
+services that require HTTPS endpoints, you can run this server locally and expose it via an HTTPS
+tunnel (e.g., ngrok):
 
-- Server is running at `http://localhost:3000`.
-- Client metadata document is hosted at:
-  - `https://client.example.com/oauth/metadata.json`
-- Redirect URI in the metadata is:
-  - `https://client.example.com/oauth/callback`
+1. Start the server: `npm start`
+2. Start ngrok: `ngrok http 3000`
+3. Use the ngrok HTTPS URL (e.g., `https://abc123.ngrok-free.app`) as your authorization server base URL
 
-You can initiate an authorization request in a browser by constructing a URL like:
+### Testing with External Tools
 
-```text
-http://localhost:3000/authorize
-  ?response_type=code
-  &client_id=https%3A%2F%2Fclient.example.com%2Foauth%2Fmetadata.json
-  &redirect_uri=https%3A%2F%2Fclient.example.com%2Foauth%2Fcallback
-  &state=xyz
-```
+Once you have an HTTPS URL from your tunnel, you can use it with OAuth testing tools such as:
 
-If everything is valid, you will be redirected to:
+- **client.dev** - `https://client.dev`
+- **example-app.com/client** - `https://example-app.com/client`
 
-```text
-https://client.example.com/oauth/callback?code=cimd-demo-code&state=xyz
-```
+When configuring these tools, use your tunnel HTTPS URL with the following endpoints:
 
----
+- **Authorization Endpoint**: `https://abc123.ngrok-free.app/authorize`
+- **Token Endpoint**: `https://abc123.ngrok-free.app/token`
 
-## Example Token Request (Local)
+### Configuration Notes
 
-After receiving `code=cimd-demo-code` from the `/authorize` redirect, you can exchange it for a
-token:
-
-```bash
-curl -X POST http://localhost:3000/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&code=cimd-demo-code"
-```
-
-You should receive a JSON token response similar to:
-
-```json
-{
-  "access_token": "cimd-demo-access-token",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
-
----
-
-## Using the Server via an HTTPS Tunnel
-
-If you want to test CIMD clients that require HTTPS endpoints, you can run this server locally and
-expose it via an HTTPS tunnel so that the outside world sees URLs like:
-
-- `https://your-tunnel.example.com/authorize`
-- `https://your-tunnel.example.com/token`
-
-In that case:
-
-- Configure your client to use those HTTPS endpoints as the **authorization endpoint** and
-  **token endpoint**.
-- Ensure that your `client_id` metadata document and registered `redirect_uris` still use HTTPS and
-  follow the CIMD rules.
-
-The server itself does not need to know about the tunnel; it only sees normal HTTP requests on its
-local port.
+- Configure your client metadata document to use the HTTPS tunnel URLs for `redirect_uris`.
+- Ensure your `client_id` metadata document is still hosted at an HTTPS URL (e.g., GitHub raw URL).
+- The server itself does not need to know about the tunnel; it only sees normal HTTP requests on its
+  local port.
 
 ---
 

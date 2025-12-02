@@ -17,7 +17,7 @@ function generateAuthorizationCode() {
 }
 
 // Very permissive CORS for demo/testing purposes so browser-based
-// clients (e.g. https://client.dev) can call the ngrok-hosted server.
+// clients can call the server from different origins (useful for local testing).
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
