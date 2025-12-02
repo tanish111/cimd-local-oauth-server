@@ -1,8 +1,20 @@
 import express from "express";
 import fetch from "node-fetch";
+import crypto from "crypto";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Parse form data
+app.use(express.urlencoded({ extended: false }));
+
+// In-memory store for authorization codes: code -> { client_id, redirect_uri, expires_at }
+const authorizationCodes = new Map();
+
+// Generate a random authorization code
+function generateAuthorizationCode() {
+  return crypto.randomBytes(32).toString("base64url");
+}
 
 // Very permissive CORS for demo/testing purposes so browser-based
 // clients (e.g. https://client.dev) can call the ngrok-hosted server.
@@ -164,8 +176,53 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
   });
 });
 
+/**
+ * Show login form for OAuth authorization
+ */
+function showLoginForm(req, res, params, error = null) {
+  const { client_id, redirect_uri, response_type, state, scope } = params;
+  // Preserve all params in hidden fields so we can redirect after login
+  const hiddenFields = Object.entries(params)
+    .map(([k, v]) => `<input type="hidden" name="${k}" value="${v || ""}">`)
+    .join("\n    ");
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(`
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>OAuth Login - CIMD Server</title>
+    <style>
+      body { font-family: sans-serif; max-width: 400px; margin: 50px auto; padding: 20px; }
+      form { border: 1px solid #ddd; padding: 20px; border-radius: 8px; }
+      input { width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; }
+      button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; width: 100%; }
+      button:hover { background: #0056b3; }
+      .error { color: red; margin-bottom: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>OAuth Login</h1>
+    ${error ? `<div class="error">${error}</div>` : ""}
+    <form method="POST" action="/authorize">
+      ${hiddenFields}
+      <label>Username:</label>
+      <input type="text" name="username" required autofocus>
+      <label>Password:</label>
+      <input type="password" name="password" required>
+      <button type="submit">Login</button>
+    </form>
+    <p style="font-size: 0.9em; color: #666; margin-top: 20px;">
+      Demo credentials: <strong>admin</strong> / <strong>admin</strong>
+    </p>
+  </body>
+</html>
+  `);
+}
+
 async function handleAuthorize(req, res, params) {
-  const { client_id: rawClientId, redirect_uri, response_type, state } = params;
+  const { client_id: rawClientId, redirect_uri, response_type, state, username, password } = params;
 
   try {
     if (!rawClientId) {
@@ -184,17 +241,36 @@ async function handleAuthorize(req, res, params) {
     const metadata = await fetchAndValidateClientMetadata(clientIdUrl);
     validateRedirectUri(String(redirect_uri), metadata);
 
-    // In a real server, we would now authenticate the user, get consent,
-    // generate an authorization code, and redirect. Here we only demonstrate
-    // successful validation and a dummy code.
-    const dummyCode = "cimd-demo-code";
-    const url = new URL(String(redirect_uri));
-    url.searchParams.set("code", dummyCode);
-    if (state) {
-      url.searchParams.set("state", String(state));
+    // If this is a login POST, validate credentials
+    if (req.method === "POST" && username && password) {
+      // Simple demo: only accept admin/admin
+      if (username !== "admin" || password !== "admin") {
+        return showLoginForm(req, res, params, "Invalid username or password");
+      }
+
+      // Login successful - generate authorization code and redirect
+      const code = generateAuthorizationCode();
+      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+      // Store the code with associated metadata
+      authorizationCodes.set(code, {
+        client_id: clientIdUrl,
+        redirect_uri: String(redirect_uri),
+        expires_at: expiresAt,
+      });
+
+      // Redirect to callback with code
+      const url = new URL(String(redirect_uri));
+      url.searchParams.set("code", code);
+      if (state) {
+        url.searchParams.set("state", String(state));
+      }
+
+      return res.redirect(url.toString());
     }
 
-    res.redirect(url.toString());
+    // GET request - show login form
+    showLoginForm(req, res, params);
   } catch (err) {
     const message = err instanceof Error ? err.message : "server_error";
     res.status(400).json({ error: "invalid_request", error_description: message });
@@ -212,16 +288,14 @@ app.get("/authorize", async (req, res) => {
 
 /**
  * Minimal /authorize endpoint (POST)
- * Some OAuth clients send POST requests to the authorization endpoint.
- * We accept application/x-www-form-urlencoded here and reuse the same logic.
+ * Handles both OAuth client POST requests and login form submissions.
  */
-app.post("/authorize", express.urlencoded({ extended: false }), async (req, res) => {
+app.post("/authorize", async (req, res) => {
   await handleAuthorize(req, res, req.body || {});
 });
 
 /**
- * Minimal /token endpoint stub.
- * Returns a dummy token for the dummy code. This is just to complete the flow.
+ * Token endpoint - exchanges authorization code for access token
  */
 app.post("/token", express.urlencoded({ extended: false }), (req, res) => {
   const { grant_type, code } = req.body || {};
@@ -233,16 +307,41 @@ app.post("/token", express.urlencoded({ extended: false }), (req, res) => {
     });
   }
 
-  if (code !== "cimd-demo-code") {
+  if (!code) {
     return res.status(400).json({
-      error: "invalid_grant",
-      error_description: "Invalid or expired authorization code",
+      error: "invalid_request",
+      error_description: "Authorization code is required",
     });
   }
 
-  // Return a small dummy access token
+  // Look up the code in our store
+  const codeData = authorizationCodes.get(String(code));
+
+  if (!codeData) {
+    return res.status(400).json({
+      error: "invalid_grant",
+      error_description: "Invalid authorization code",
+    });
+  }
+
+  // Check if code has expired
+  if (Date.now() > codeData.expires_at) {
+    authorizationCodes.delete(String(code)); // Clean up expired code
+    return res.status(400).json({
+      error: "invalid_grant",
+      error_description: "Authorization code has expired",
+    });
+  }
+
+  // Code is valid - delete it (one-time use) and issue token
+  authorizationCodes.delete(String(code));
+
+  // Generate a real access token
+  const accessToken = crypto.randomBytes(32).toString("base64url");
+
+  // Return access token
   res.json({
-    access_token: "cimd-demo-access-token",
+    access_token: accessToken,
     token_type: "Bearer",
     expires_in: 3600,
   });
