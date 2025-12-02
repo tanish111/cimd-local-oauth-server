@@ -1,5 +1,5 @@
 {
-  "client_id": "https://raw.githubusercontent.com/tanish111/fleet-bot-3/refs/heads/main/client-metadata.json",
+  "client_id": "https://raw.githubusercontent.com/tanish111/cimd-local-oauth-server/refs/heads/main/client-metadata.json",
   "redirect_uris": ["https://www.google.com"],
   "grant_types": ["authorization_code"],
   "response_types": ["code"],
