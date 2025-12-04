@@ -1,6 +1,6 @@
 {
   "client_id": "https://raw.githubusercontent.com/tanish111/cimd-local-oauth-server/refs/heads/main/client-metadata.json",
-  "redirect_uris": ["http://localhost:3000/callback"],
+  "redirect_uris": ["http://localhost:8080/callback"],
   "grant_types": ["authorization_code"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none"
